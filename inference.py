@@ -1,10 +1,11 @@
-from dataset import ShapeNet_Points, ShapeNet_PC
-from models import pointnet, pointnet2
 from psbody.mesh import Mesh
-from loss import chamfer_distance
 import os
 import numpy as np
 import torch
+
+from dataset import ShapeNet_Points, ShapeNet_PC
+from models import pointnet, pointnet2
+from loss import chamfer_distance
 
 torch.manual_seed(0)
 np.random.seed(0)

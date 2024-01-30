@@ -5,8 +5,9 @@ import os, time
 import matplotlib.pyplot as plt
 from torch import nn, optim
 from models import pointnet
-from utils import random_rotate_batch, random_rotate_y_batch
-from visualize import output_meshes
+from utils import random_rotate_batch
+# , random_rotate_y_batch
+# from visualize import output_meshes
 
 def unfold_rotenc(data, rotenc, iters=5):
     R_cum = torch.eye(3).unsqueeze(0).repeat(data.size(0), 1, 1).to(data.device)
@@ -19,10 +20,10 @@ def unfold_rotenc(data, rotenc, iters=5):
 def train_autoencoder(models, losses, optimizers, data, epoch, opt):
     optimizers['opt'].zero_grad()
 
-    if opt.azimuthal:
-        random_rotate = random_rotate_y_batch
-    else:
-        random_rotate = random_rotate_batch
+    # if opt.azimuthal:
+    #     random_rotate = random_rotate_y_batch
+    # else:
+    random_rotate = random_rotate_batch
 
     if opt.art:
         data_rot_1, rotmat_1 = random_rotate(data)
@@ -100,22 +101,25 @@ def train_model(models, losses, optimizers, train_loader, vald_loader, device, o
         start_epoch = int(ckpt_file.split('.')[0]) + 1
 
     print('Training started')
-    print('azimuthal?', opt.azimuthal)
+    # print('azimuthal?', opt.azimuthal)
 
     for epoch in range(start_epoch, 1+num_epochs):
         t1 = time.time()
+        print ('Epoch {}/{}'.format(epoch, num_epochs))
 
         models['enc'].train()
         models['dec'].train()
         if opt.art:
             models['rot_enc'].train()
 
-        train_loader.dataset.resample()
+        # train_loader.dataset.resample()
 
         train_loss_dict = {'chamfer_dist': 0, 'rot_loss_mse': 0, 'rot_loss_chamfer': 0}
         vald_loss_dict = {'chamfer_dist': 0}
 
         for i, data in enumerate(train_loader):
+            print('\tBatch {}/{}'.format(i+1, len(train_loader)), end='\r', flush=True)
+
             data = data.to(device)
 
             recon_loss, rot_loss_mse, rot_loss_chamfer = train_autoencoder(models, losses, optimizers, data, epoch, opt)
@@ -149,11 +153,11 @@ def train_model(models, losses, optimizers, train_loader, vald_loader, device, o
 
                     vald_loss_dict['chamfer_dist'] += recon_loss.item() * x.size(0)
 
-                    if epoch % vis_step == 0 and batch_idx == 0:
-                        x = x.cpu().numpy().reshape(x.shape[0], 1, -1, 3)
-                        y = y.cpu().numpy().reshape(y.shape[0], 1, -1, 3)
-                        meshes = np.concatenate([x, y], axis=1)
-                        output_meshes(meshes, epoch)
+                    # if epoch % vis_step == 0 and batch_idx == 0:
+                    #     x = x.cpu().numpy().reshape(x.shape[0], 1, -1, 3)
+                    #     y = y.cpu().numpy().reshape(y.shape[0], 1, -1, 3)
+                    #     meshes = np.concatenate([x, y], axis=1)
+                    #     output_meshes(meshes, epoch)
                 
 
             if epoch % log_step == 0:
