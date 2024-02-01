@@ -178,3 +178,141 @@ def train_model(models, losses, optimizers, train_loader, vald_loader, device, o
                 checkpoint.update({'torch_rnd': torch.get_rng_state(), 'numpy_rnd': np.random.get_state()})
                 torch.save(checkpoint, os.path.join(save_path, '{}.pth'.format(epoch)))
 
+
+
+
+
+
+###############
+                
+
+def train_rotenc(model, losses, optimizers, data, epoch, opt):
+    # Zero the gradients of the optimizer
+    optimizers['opt'].zero_grad()
+
+    # Define the rotation function
+    random_rotate = random_rotate_batch
+
+    # see chapter 3.2 EQ 4 and 5
+    # Apply random rotations to the data (R_tilde)
+    data_rot_1, rotmat_1 = random_rotate(data)
+    data_rot_2, rotmat_2 = random_rotate(data)
+    data_rot_3, rotmat_3 = random_rotate(data)
+    
+    # Unfold the rotation encodings (R2)
+    R_1 = unfold_rotenc(data_rot_1, model, opt.iters)
+    R_2 = unfold_rotenc(data_rot_2, model, opt.iters)
+    R_3 = unfold_rotenc(data_rot_3, model, opt.iters)
+
+    # Unfold the rotation encoding of the original data (R1)
+    R = unfold_rotenc(data, model, opt.iters)
+
+    # Compute the product of the rotation matrices EQ = R2^T * R1
+    rotprod_1 = torch.matmul(R, R_1.transpose(1, 2))
+    rotprod_2 = torch.matmul(R, R_2.transpose(1, 2))
+    rotprod_3 = torch.matmul(R, R_3.transpose(1, 2))
+
+    # Compute the mean squared error loss between the rotation matrices and their products
+    rot_loss_mse = (F.mse_loss(rotmat_1, rotprod_1) + \
+                    F.mse_loss(rotmat_2, rotprod_2) + \
+                    F.mse_loss(rotmat_3, rotprod_3)) / 3
+
+    # Compute the chamfer loss between the rotated data and the product of the original data and the rotation matrices
+    with torch.cuda.device(data.device):
+        rot_loss_chamfer = (losses['chamfer'](torch.matmul(data, rotprod_1), data_rot_1) + \
+                            losses['chamfer'](torch.matmul(data, rotprod_2), data_rot_2) + \
+                            losses['chamfer'](torch.matmul(data, rotprod_3), data_rot_3)) / 3
+            
+    # Compute the chamfer distance between the original data and the target data
+    with torch.cuda.device(data.device):
+        chamfer_dist = losses['chamfer'](data, y)
+
+    # Compute the total loss
+    loss = chamfer_dist + rot_loss_mse * 0.02 + rot_loss_chamfer * opt.lambda2
+
+    # Backpropagate the loss
+    loss.backward()
+
+    # Update the model parameters
+    optimizers['opt'].step()
+
+    return chamfer_dist, rot_loss_mse, rot_loss_chamfer
+
+def train_single_model(model, losses, optimizers, train_loader, vald_loader, device, opt, save_path=None):
+    num_epochs = 500
+    start_epoch = 1
+    vis_step = 500
+    log_step = 1
+    best_loss = 1000
+
+    # ckpt_files = sorted(os.listdir(save_path))
+
+    # if opt.resume and len(ckpt_files) > 0:
+    #     ckpt_file = ckpt_files[-1]
+    #     ckpt = torch.load(os.path.join(save_path, ckpt_file), map_location=device)
+
+    #     model.load_state_dict(ckpt['m_'+k])
+    #     optimizers.load_state_dict(ckpt['o_'+k])
+
+    #     start_epoch = int(ckpt_file.split('.')[0]) + 1
+
+    print('Training started')
+    # print('azimuthal?', opt.azimuthal)
+
+    for epoch in range(start_epoch, 1+num_epochs):
+        t1 = time.time()
+        print ('Epoch {}/{}'.format(epoch, num_epochs))
+
+        model.train()
+
+        train_loss_dict = {'chamfer_dist': 0, 'rot_loss_mse': 0, 'rot_loss_chamfer': 0}
+        vald_loss_dict = {'chamfer_dist': 0}
+
+        for i, data in enumerate(train_loader):
+            print('\tBatch {}/{}'.format(i+1, len(train_loader)), end='\r', flush=True)
+
+            data = data.to(device)
+
+            recon_loss, rot_loss_mse, rot_loss_chamfer = train_rotenc(model, losses, optimizers, data, epoch, opt)
+
+            train_loss_dict['chamfer_dist'] += recon_loss.item() * data.size(0)
+            train_loss_dict['rot_loss_mse'] += rot_loss_mse.item() * data.size(0)
+            train_loss_dict['rot_loss_chamfer'] += rot_loss_chamfer.item() * data.size(0)
+
+        t2 = time.time()
+        print(t2-t1)
+
+        if epoch > 0:
+            model.eval()
+
+            with torch.no_grad():
+                for batch_idx, x in enumerate(vald_loader):
+                    x = x.to(device)
+                    if opt.art:
+                        R = unfold_rotenc(x, model, opt.iters)
+
+                    with torch.cuda.device(device):
+                        recon_loss = losses['chamfer'](x, y)
+
+                    vald_loss_dict['chamfer_dist'] += recon_loss.item() * x.size(0)
+                
+
+            if epoch % log_step == 0:
+                print('====> Epoch {}/{}: Training'.format(epoch, num_epochs), flush=True)
+                
+                for term in train_loss_dict:
+                    print('\t{} {:.5f}'.format(term, train_loss_dict[term] / len(train_loader.dataset)), flush=True)
+                
+                vald_loss = vald_loss_dict['chamfer_dist'] / len(vald_loader.dataset)
+                print('====> Epoch {}/{}: Validation'.format(epoch, num_epochs), flush=True)
+                for term in vald_loss_dict:
+                    print('\t{} {:.5f}'.format(term, vald_loss), flush=True)
+
+            if vald_loss < best_loss:
+                best_loss = vald_loss
+                checkpoint = dict([('m_'+t, models[t].state_dict() if models[t] else None) for t in models])
+                checkpoint.update(dict([('o_'+t, optimizers[t].state_dict()) for t in optimizers]))
+                checkpoint.update({'torch_rnd': torch.get_rng_state(), 'numpy_rnd': np.random.get_state()})
+                torch.save(checkpoint, os.path.join(save_path, '{}.pth'.format(epoch)))
+
+

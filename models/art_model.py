@@ -70,8 +70,8 @@ class PointNetFeatureExtractor(nn.Module):
         if not self.transposed_input:
             x = x.transpose(1, 2)
 
-        # Number of points
-        num_points = x.shape[2]
+        # # Number of points
+        # num_points = x.shape[2]
 
         # Apply a sequence of conv-batchnorm-nonlinearity operations
 
