@@ -1,0 +1,28 @@
+description: Sweep test
+
+program: wandb-sweep.py
+
+method: random
+
+metric:
+  name: loss
+  goal: minimize
+
+for param in [-1, 0, 1, 2, 3]:
+
+    opt.lambda_cd = 10**param
+
+parameters:
+  iters:
+    values: [8, 4, 2, 1]
+  lambda_cd:
+    values: [0.1, 1, 10, 100, 1000]
+  lr:
+    distribution: uniform
+    min: 0.000001
+    max: 0.01  
+early_terminate:
+  type: hyperband
+  s: 0
+  eta: 0
+  max_iter: 0
