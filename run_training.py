@@ -39,22 +39,23 @@ def main(rank=0, world_size=1):
 
     data_config = EasyDict(
         {
-            "num_points_gt": 16384,  # 2048, #2048,
-            "num_points_corr": 16384,  # 16384, #16384,  # 2048 4096 8192 16384
+            "num_points_gt": 8192,  # 2048, #2048,
+            "num_points_corr": 0,  # 16384, #16384,  # 2048 4096 8192 16384
             "num_points_corr_type": "full",
             "num_points_gt_type": "full",
             "tooth_range": {
                 "corr": "full",
                 "gt": "full",  # "full",
-                "jaw": "full",
+                "jaw": "lower",
                 "quadrants": "all",
             },
+            "return_only_full_gt": True,
             "gt_type": "full",
             "data_type": "npy",
             "samplingmethod": "fps",
             "downsample_steps": 2,
             "use_fixed_split": True,
-            "enable_cache": False,
+            "enable_cache": True,
             "create_cache_file": True,
             "overwrite_cache_file": False,
             "cache_dir": op.join(
@@ -72,7 +73,7 @@ def main(rank=0, world_size=1):
             "experiment_dir": pada.model_base_dir,
             "start_ckpts": None,
             "ckpts": None,
-            "val_freq": 20,
+            "val_freq": 10,
             "test_freq": None,
             "resume": False,
             "test": False,
@@ -81,7 +82,7 @@ def main(rank=0, world_size=1):
             "save_only_best": True,
             "ckpt_dir": None,
             "cfg_dir": None,
-            "log_data": False,  # if true: wandb logger on and save ckpts to local drive
+            "log_data": True,  # if true: wandb logger on and save ckpts to local drive
         }
     )
 
@@ -96,23 +97,16 @@ def main(rank=0, world_size=1):
             },
             "dataset": data_config,
             "model": {
+                "NAME": "ART",
+                "iters": 5,
+                "lambda_cd": 1e-3,
                 "gt_type": data_config.gt_type,
-                "cd_norm": 2,
             },
             "max_epoch": 500,
-            "consider_metric": "CDL2",
-            "bs": 16,
+            # "consider_metric": "CDL2",
+            "bs": 12,
             "step_per_update": 1,
             "model_name": "ART",
-        }
-    )
-
-    config["model"] = EasyDict(
-        {
-            "NAME": "ART",
-            "iters": 5,
-            "lambda_mse": 2,
-            "lambda_cd": 50,
         }
     )
 
@@ -142,15 +136,14 @@ def main(rank=0, world_size=1):
         torch.backends.cudnn.benchmark = True
 
     if config.model.iters > 5:
-        config.total_bs = 8
+        config.bs = 2
 
     # ----------------------------- Prepare training -----------------------------
 
     if args.log_data:
         wandb.init(
-            # set the wandb project where this run will be logged
+            # set the wandb project where this run will be logged, dont set config here, else sweep will fail
             project="ART-Orientation",
-            config=config,
             save_code=True,
         )
 
@@ -180,8 +173,9 @@ def main(rank=0, world_size=1):
             else:
                 config[key] = value
 
-    if args.log_data:
         args.sweep = True if "sweep" in wandb_config else False
+
+        wandb.config.update(config, allow_val_change=True)
     else:
         args.sweep = False
 
@@ -226,20 +220,20 @@ if __name__ == "__main__":
     print("Number of GPUs: ", num_gpus)
 
     if num_gpus > 1:
+        sys.exit()
+        # if num_gpus == 2:
+        #     os.environ["CUDA_VISIBLE_DEVICES"] = "2,3"
+        # elif num_gpus == 3:
+        #     os.environ["CUDA_VISIBLE_DEVICES"] = "1,2,3"
+        # elif num_gpus == 4:
+        #     os.environ["CUDA_VISIBLE_DEVICES"] = "0,1,2,3"
 
-        if num_gpus == 2:
-            os.environ["CUDA_VISIBLE_DEVICES"] = "2,3"
-        elif num_gpus == 3:
-            os.environ["CUDA_VISIBLE_DEVICES"] = "1,2,3"
-        elif num_gpus == 4:
-            os.environ["CUDA_VISIBLE_DEVICES"] = "0,1,2,3"
-
-        os.environ["MASTER_ADDR"] = "localhost"
-        os.environ["MASTER_PORT"] = "12345"  # Set any free port
-        os.environ["WORLD_SIZE"] = str(num_gpus)
-        # mp.spawn(main, args=(num_gpus, ), nprocs=num_gpus, join=True)
-        mp.spawn(main, args=(num_gpus,), nprocs=num_gpus, join=True)
+        # os.environ["MASTER_ADDR"] = "localhost"
+        # os.environ["MASTER_PORT"] = "12345"  # Set any free port
+        # os.environ["WORLD_SIZE"] = str(num_gpus)
+        # # mp.spawn(main, args=(num_gpus, ), nprocs=num_gpus, join=True)
+        # mp.spawn(main, args=(num_gpus,), nprocs=num_gpus, join=True)
     else:
-        os.environ["CUDA_VISIBLE_DEVICES"] = "0"
-        os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
+        # os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+        # os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
         main(rank=0, world_size=1)
