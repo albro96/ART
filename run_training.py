@@ -73,7 +73,7 @@ def main(rank=0, world_size=1):
             "experiment_dir": pada.model_base_dir,
             "start_ckpts": None,
             "ckpts": None,
-            "val_freq": 10,
+            "val_freq": 20,
             "test_freq": None,
             "resume": False,
             "test": False,
@@ -85,6 +85,13 @@ def main(rank=0, world_size=1):
             "log_data": True,  # if true: wandb logger on and save ckpts to local drive
         }
     )
+
+    bs_dict = {
+        2048: 56,
+        4096: 28,
+        8192: 14,
+        16384: 6,
+    }
 
     config = EasyDict(
         {
@@ -100,11 +107,12 @@ def main(rank=0, world_size=1):
                 "NAME": "ART",
                 "iters": 5,
                 "lambda_cd": 1e-3,
+                "rot_loss_type": "rot_loss_angle",  # 'rot_loss_angle' or 'rot_loss_mse'
                 "gt_type": data_config.gt_type,
             },
             "max_epoch": 500,
             # "consider_metric": "CDL2",
-            "bs": 12,
+            "bs": bs_dict[data_config.num_points_gt],
             "step_per_update": 1,
             "model_name": "ART",
         }
