@@ -128,7 +128,7 @@ def run_net(args, config):
     #     args, config.dataset, mode="test", bs=1
     # )
 
-    model = art_model.PointNetTransformNet()
+    model = art_model.PointNetTransformNet(config=config)
 
     if args.use_gpu:
         model = nn.DataParallel(model).to(args.device)
@@ -204,6 +204,7 @@ def run_net(args, config):
             # Backpropagate the loss
 
             loss.backward()
+
             torch.nn.utils.clip_grad_norm_(
                 model.parameters(),
                 config.model.grad_norm_clip,

@@ -109,8 +109,10 @@ class PointNetFeatureExtractor(nn.Module):
 
 
 class PointNetTransformNet(nn.Module):
-    def __init__(self, in_channels=3):
+    def __init__(self, in_channels=3, config=None):
         super(PointNetTransformNet, self).__init__()
+
+        dropout_rate = 0.0 if config is None else config.model.get("dropout_rate", 0.0)
 
         self.in_channels = in_channels
 
@@ -125,11 +127,28 @@ class PointNetTransformNet(nn.Module):
             transposed_input=True,
         )
 
+        # self.layers = nn.Sequential(
+        #     self.feature_extractor,
+        #     nn.Linear(1024, 512),
+        #     nn.BatchNorm1d(512),
+        #     nn.ReLU(),
+        #     nn.Linear(512, 256),
+        #     nn.BatchNorm1d(256),
+        #     nn.ReLU(),
+        #     # newly added
+        #     # nn.Linear(256, 128),
+        #     # nn.BatchNorm1d(128),
+        #     # nn.ReLU(),
+        #     nn.Linear(256, 6),
+        # )
+
         self.layers = nn.Sequential(
             self.feature_extractor,
+            nn.Dropout(dropout_rate),  # Dropout layer after feature extraction
             nn.Linear(1024, 512),
             nn.BatchNorm1d(512),
             nn.ReLU(),
+            nn.Dropout(dropout_rate),  # Dropout layer after first ReLU
             nn.Linear(512, 256),
             nn.BatchNorm1d(256),
             nn.ReLU(),
@@ -137,6 +156,7 @@ class PointNetTransformNet(nn.Module):
             # nn.Linear(256, 128),
             # nn.BatchNorm1d(128),
             # nn.ReLU(),
+            nn.Dropout(dropout_rate),  # Dropout layer before final linear layer
             nn.Linear(256, 6),
         )
 
