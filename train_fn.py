@@ -2,10 +2,6 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 import os, time
-
-# import matplotlib.pyplot as plt
-# from torch import nn, optim
-# from models import pointnet
 from utils import random_rotate_batch
 import sys
 import wandb
@@ -14,16 +10,13 @@ import os.path as op
 import torch.nn as nn
 import functorch
 from easydict import EasyDict
+import glob
+from pytorch3d.loss import chamfer_distance
 
 sys.path.append("/storage/share/code/01_scripts/modules/")
 from general_tools.format import format_duration
 from tools import builder
 from models import art_model
-from loss import chamfer_distance
-import glob
-
-# , random_rotate_y_batch
-# from visualize import output_meshes
 
 
 def unfold_rotenc(data, rotenc, iters=5):
@@ -52,8 +45,10 @@ def get_angle(R1, R2):
 
     batch_trace = functorch.vmap(torch.trace)(product)
 
+    cos_angle = torch.clamp((batch_trace - 1) / 2, -0.999, 0.999)
+
     # angles of batched rotation matrices
-    angle = torch.acos(torch.clamp((batch_trace - 1) / 2, -1, 1))
+    angle = torch.acos(cos_angle)
 
     # return mean angle
     return torch.mean(angle)
@@ -62,7 +57,7 @@ def get_angle(R1, R2):
 # ----------------------------- Train Single Model ----------------------------- #
 
 
-def calc_loss_rotenc(model, losses, data, config):
+def calc_loss_rotenc(model, data, config):
     loss_dict = EasyDict()
 
     # Define the rotation function
@@ -105,18 +100,20 @@ def calc_loss_rotenc(model, losses, data, config):
     ) / 3
 
     # Compute the chamfer loss between the rotated data and the product of the original data and the rotation matrices
-    with torch.cuda.device(data.device):
-        loss_dict.rot_loss_chamfer = (
-            losses["chamfer"](torch.matmul(data, rotprod_1), data_rot_1)
-            + losses["chamfer"](torch.matmul(data, rotprod_2), data_rot_2)
-            + losses["chamfer"](torch.matmul(data, rotprod_3), data_rot_3)
-        ) / 3
+    # with torch.cuda.device(data.device):
+    loss_dict.rot_loss_chamfer = (
+        chamfer_distance(
+            torch.matmul(data, rotprod_1), data_rot_1, norm=config.model.cd_norm
+        )[0]
+        + chamfer_distance(
+            torch.matmul(data, rotprod_2), data_rot_2, norm=config.model.cd_norm
+        )[0]
+        + chamfer_distance(
+            torch.matmul(data, rotprod_3), data_rot_3, norm=config.model.cd_norm
+        )[0]
+    ) / 3
 
-    return (
-        loss_dict,
-        data_rot_1,
-        torch.matmul(data_rot_1, rotprod_1.transpose(1, 2)),
-    )
+    return loss_dict, data_rot_1, torch.matmul(data_rot_1, rotprod_1.transpose(1, 2))
 
 
 def run_net(args, config):
@@ -135,9 +132,6 @@ def run_net(args, config):
 
     if args.use_gpu:
         model = nn.DataParallel(model).to(args.device)
-
-    losses = {}
-    losses["chamfer"] = chamfer_distance
 
     optimizer = builder.build_optimizer(model, config)
 
@@ -193,7 +187,7 @@ def run_net(args, config):
             # Zero the gradients of the optimizer
             optimizer.zero_grad()
 
-            loss_dict, _, _ = calc_loss_rotenc(model, losses, data, config)
+            loss_dict, _, _ = calc_loss_rotenc(model, data, config)
 
             # Compute the total loss
             # loss =  rot_loss_mse * 0.02 + rot_loss_chamfer * opt.lambda2
@@ -208,10 +202,17 @@ def run_net(args, config):
             )
 
             # Backpropagate the loss
+
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(
+                model.parameters(),
+                config.model.grad_norm_clip,
+                norm_type=2,
+            )
 
             # Update the model parameters
             optimizer.step()
+            model.zero_grad()
 
             # print(loss.item(), rot_loss_chamfer.item(), rot_loss_mse.item())
 
@@ -254,7 +255,7 @@ def run_net(args, config):
 
         if epoch % args.val_freq == 0:
 
-            val_loss_dict = validate(model, val_dataloader, epoch, args, config, losses)
+            val_loss_dict = validate(model, val_dataloader, epoch, args, config)
 
             if args.log_data:
                 checkpoint = {
@@ -290,76 +291,7 @@ def run_net(args, config):
         )
 
 
-def train_autoencoder(models, losses, optimizers, data, epoch, opt):
-    optimizers["opt"].zero_grad()
-
-    # if opt.azimuthal:
-    #     random_rotate = random_rotate_y_batch
-    # else:
-    random_rotate = random_rotate_batch
-
-    if opt.art:
-        data_rot_1, rotmat_1 = random_rotate(data)
-        data_rot_2, rotmat_2 = random_rotate(data)
-        data_rot_3, rotmat_3 = random_rotate(data)
-        R_1 = unfold_rotenc(data_rot_1, models["rot_enc"], opt.iters)
-        R_2 = unfold_rotenc(data_rot_2, models["rot_enc"], opt.iters)
-        R_3 = unfold_rotenc(data_rot_3, models["rot_enc"], opt.iters)
-
-        R = unfold_rotenc(data, models["rot_enc"], opt.iters)
-
-        rotprod_1 = torch.matmul(R, R_1.transpose(1, 2))
-        rotprod_2 = torch.matmul(R, R_2.transpose(1, 2))
-        rotprod_3 = torch.matmul(R, R_3.transpose(1, 2))
-
-        rot_loss_mse = (
-            F.mse_loss(rotmat_1, rotprod_1)
-            + F.mse_loss(rotmat_2, rotprod_2)
-            + F.mse_loss(rotmat_3, rotprod_3)
-        ) / 3
-
-        z = models["enc"](data, R)
-        y = models["dec"](z, R)
-
-        with torch.cuda.args.device(data.args.device):
-            rot_loss_chamfer = (
-                losses["chamfer"](torch.matmul(data, rotprod_1), data_rot_1)
-                + losses["chamfer"](torch.matmul(data, rotprod_2), data_rot_2)
-                + losses["chamfer"](torch.matmul(data, rotprod_3), data_rot_3)
-            ) / 3
-    elif opt.itn:
-        R = unfold_rotenc(data, models["rot_enc"], opt.iters)
-        z = models["enc"](data, R)
-        y = models["dec"](z, R)
-    elif opt.tnet:
-        R = models["rot_enc"](data.transpose(1, 2).contiguous())
-        z = models["enc"](data, R)
-        y = models["dec"](z, torch.inverse(R))
-    else:
-        data, _ = random_rotate(data)
-
-        z = models["enc"](data)
-        y = models["dec"](z)
-
-    with torch.cuda.args.device(data.args.device):
-        chamfer_dist = losses["chamfer"](data, y)
-
-    if opt.art:
-        loss = chamfer_dist + rot_loss_mse * 0.02 + rot_loss_chamfer * opt.lambda2
-
-    else:
-        loss = chamfer_dist
-        rot_loss_mse = torch.tensor(0)
-        rot_loss_chamfer = torch.tensor(0)
-
-    loss.backward()
-
-    optimizers["opt"].step()
-
-    return chamfer_dist, rot_loss_mse, rot_loss_chamfer
-
-
-def validate(model, val_dataloader, epoch, args, config, losses):
+def validate(model, val_dataloader, epoch, args, config):
     print("\nEpoch {}/{}: Validation".format(epoch, config.max_epoch))
 
     model.eval()
@@ -382,9 +314,7 @@ def validate(model, val_dataloader, epoch, args, config, losses):
 
             data = data.to(args.device)
 
-            loss_dict, pcd_rot, pcd_backrot = calc_loss_rotenc(
-                model, losses, data, config
-            )
+            loss_dict, pcd_rot, pcd_backrot = calc_loss_rotenc(model, data, config)
 
             # loss = (
             #     loss_dict.rot_loss_mse
@@ -402,12 +332,17 @@ def validate(model, val_dataloader, epoch, args, config, losses):
                     val_loss_dict[key] += val.item() * data.size(0)
 
             if val_dataloader.dataset.patient == "0U1LI1CB" and args.log_data:
+                suffix = (
+                    f"-{val_dataloader.dataset.jaw}"
+                    if config.dataset.tooth_range.jaw == "full-separate"
+                    else ""
+                )
 
                 if epoch == args.val_freq:
                     # save gt only once
                     wandb.log(
                         {
-                            f"val/pcd/gt": wandb.Object3D(
+                            f"val/pcd/gt{suffix}": wandb.Object3D(
                                 {
                                     "type": "lidar/beta",
                                     "points": data[0].detach().cpu().numpy(),
@@ -419,13 +354,13 @@ def validate(model, val_dataloader, epoch, args, config, losses):
 
                 wandb.log(
                     {
-                        f"val/pcd/rot": wandb.Object3D(
+                        f"val/pcd/rot{suffix}": wandb.Object3D(
                             {
                                 "type": "lidar/beta",
                                 "points": pcd_rot[0].detach().cpu().numpy(),
                             }
                         ),
-                        f"val/pcd/backrot": wandb.Object3D(
+                        f"val/pcd/backrot{suffix}": wandb.Object3D(
                             {
                                 "type": "lidar/beta",
                                 "points": pcd_backrot[0].detach().cpu().numpy(),

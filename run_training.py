@@ -46,7 +46,7 @@ def main(rank=0, world_size=1):
             "tooth_range": {
                 "corr": "full",
                 "gt": "full",  # "full",
-                "jaw": "lower",
+                "jaw": "full-separate",
                 "quadrants": "all",
             },
             "return_only_full_gt": True,
@@ -109,8 +109,10 @@ def main(rank=0, world_size=1):
                 "lambda_cd": 1e-3,
                 "rot_loss_type": "rot_loss_angle",  # 'rot_loss_angle' or 'rot_loss_mse'
                 "gt_type": data_config.gt_type,
+                "grad_norm_clip": 5,
+                "cd_norm": 2,
             },
-            "max_epoch": 500,
+            "max_epoch": 800,
             # "consider_metric": "CDL2",
             "bs": bs_dict[data_config.num_points_gt],
             "step_per_update": 1,
