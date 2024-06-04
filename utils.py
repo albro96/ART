@@ -77,20 +77,39 @@ def rotate_y_np(x, theta):
     return x @ R
 
 
-def random_rotate_batch(x):
-    aa = torch.randn((3,), dtype=torch.float32)
-    theta = torch.sqrt(torch.sum(aa**2))
-    k = aa / (theta + 1e-6)
-    K = torch.tensor(
-        [[0, -k[2], k[1]], [k[2], 0, -k[0]], [-k[1], k[0], 0]], device=x.device
-    )
-    R = (
-        torch.eye(3, device=x.device)
-        + torch.sin(theta) * K
-        + (1 - torch.cos(theta)) * torch.mm(K, K)
-    )
-    R = R.unsqueeze(0).repeat(x.size(0), 1, 1)
+# def random_rotate_batch(x):
+#     aa = torch.randn((3,), dtype=torch.float32)
+#     theta = torch.sqrt(torch.sum(aa**2))
+#     k = aa / (theta + 1e-6)
+#     K = torch.tensor(
+#         [[0, -k[2], k[1]], [k[2], 0, -k[0]], [-k[1], k[0], 0]], device=x.device
+#     )
+#     R = (
+#         torch.eye(3, device=x.device)
+#         + torch.sin(theta) * K
+#         + (1 - torch.cos(theta)) * torch.mm(K, K)
+#     )
+#     R = R.unsqueeze(0).repeat(x.size(0), 1, 1)
 
+#     return torch.matmul(x, R), R
+
+
+def random_rotate_batch(x):
+    R = []
+    for _ in range(x.size(0)):
+        aa = torch.randn((3,), dtype=torch.float32)
+        theta = torch.sqrt(torch.sum(aa**2))
+        k = aa / (theta + 1e-6)
+        K = torch.tensor(
+            [[0, -k[2], k[1]], [k[2], 0, -k[0]], [-k[1], k[0], 0]], device=x.device
+        )
+        r = (
+            torch.eye(3, device=x.device)
+            + torch.sin(theta) * K
+            + (1 - torch.cos(theta)) * torch.mm(K, K)
+        )
+        R.append(r.unsqueeze(0))
+    R = torch.cat(R, dim=0)
     return torch.matmul(x, R), R
 
 

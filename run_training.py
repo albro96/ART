@@ -85,7 +85,7 @@ def main(rank=0, world_size=1):
             "save_only_best": True,
             "ckpt_dir": None,
             "cfg_dir": None,
-            "log_data": True,  # if true: wandb logger on and save ckpts to local drive
+            "log_data": False,  # if true: wandb logger on and save ckpts to local drive
             "run_name": "azure-sweep-129-fulldataset",
         }
     )

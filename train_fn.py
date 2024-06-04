@@ -78,6 +78,12 @@ def calc_loss_rotenc(model, data, config):
     # Unfold the rotation encoding of the original data (R1^T)
     R = unfold_rotenc(data, model, config.model.iters)
 
+    # rotmat = rotmat_1
+    # print(rotmat.shape)
+    # # check if all batch rot matrices in R are the same, i.e. if R[0, :, :] == R[1, :, :] == R[2, :, :] == ... == R[n, :, :]
+    # print(torch.all(torch.eq(rotmat[0, :, :], rotmat[12, :, :])))
+    # sys.exit()
+
     # Compute the product of the rotation matrices R_tilde = R2^T * R1 -- R_tilde^T = R1^T * R2  eq4
     # code is correct as is bcs all rot matrices are transposed to match the data shape
     rotprod_1 = torch.matmul(R, R_1.transpose(1, 2))
