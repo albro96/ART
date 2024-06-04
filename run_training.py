@@ -20,6 +20,7 @@ sys.path.append(str(BASE_DIR))
 torch.set_printoptions(precision=6)
 sys.path.append("/storage/share/code/01_scripts/modules/")
 
+from dnnlib.util import ask_yes_no
 from os_tools.import_dir_path import import_dir_path
 from train_fn import run_net
 
@@ -54,7 +55,8 @@ def main(rank=0, world_size=1):
             "data_type": "npy",
             "samplingmethod": "fps",
             "downsample_steps": 2,
-            "use_fixed_split": True,
+            "use_fixed_split": False,
+            "splits": {"train": 1, "val": 0, "test": 0},
             "enable_cache": True,
             "create_cache_file": True,
             "overwrite_cache_file": False,
@@ -73,7 +75,8 @@ def main(rank=0, world_size=1):
             "experiment_dir": pada.model_base_dir,
             "start_ckpts": None,
             "ckpts": None,
-            "val_freq": 20,
+            "val_freq": 10,
+            "val_dataset": "train",
             "test_freq": None,
             "resume": False,
             "test": False,
@@ -83,8 +86,16 @@ def main(rank=0, world_size=1):
             "ckpt_dir": None,
             "cfg_dir": None,
             "log_data": True,  # if true: wandb logger on and save ckpts to local drive
+            "run_name": "azure-sweep-129-fulldataset",
         }
     )
+
+    if args.val_dataset != "val":
+        # ask user if they want to use train dataset for validation
+        if not ask_yes_no(
+            f"\nUsing {args.val_dataset} dataset for validation: continue?"
+        ):
+            sys.exit()
 
     bs_dict = {
         2048: 56,
@@ -93,33 +104,63 @@ def main(rank=0, world_size=1):
         16384: 6,
     }
 
+    # azure-sweep-129
     config = EasyDict(
         {
             "optimizer": {
-                "type": "AdamW",
+                "type": "Adam",
                 "kwargs": {
                     "lr": 0.0001,
-                    "weight_decay": 0.0001,  # 0.0001
+                    "weight_decay": 0.00001,  # 0.0001
                 },
             },
             "dataset": data_config,
             "model": {
                 "NAME": "ART",
                 "iters": 5,
-                "lambda_cd": 1e-3,
+                "lambda_cd": 0.00001,
                 "rot_loss_type": "rot_loss_angle",  # 'rot_loss_angle' or 'rot_loss_mse'
                 "gt_type": data_config.gt_type,
                 "grad_norm_clip": 5,
                 "cd_norm": 2,
-                "dropout_rate": 0.1,
+                "dropout_rate": 0,
             },
-            "max_epoch": 500,
+            "max_epoch": 1000,
             # "consider_metric": "CDL2",
             "bs": bs_dict[data_config.num_points_gt],
             "step_per_update": 1,
             "model_name": "ART",
         }
     )
+
+    # # bumbling-sweep-133
+    # config = EasyDict(
+    #     {
+    #         "optimizer": {
+    #             "type": "Adam",
+    #             "kwargs": {
+    #                 "lr": 0.0001,
+    #                 "weight_decay": 1e-6,  # 0.0001
+    #             },
+    #         },
+    #         "dataset": data_config,
+    #         "model": {
+    #             "NAME": "ART",
+    #             "iters": 5,
+    #             "lambda_cd": 0.0001,
+    #             "rot_loss_type": "rot_loss_mse",  # 'rot_loss_angle' or 'rot_loss_mse'
+    #             "gt_type": data_config.gt_type,
+    #             "grad_norm_clip": 10,
+    #             "cd_norm": 2,
+    #             "dropout_rate": 0,
+    #         },
+    #         "max_epoch": 1000,
+    #         # "consider_metric": "CDL2",
+    #         "bs": bs_dict[data_config.num_points_gt],
+    #         "step_per_update": 1,
+    #         "model_name": "ART",
+    #     }
+    # )
 
     if args.test and args.resume:
         raise ValueError("--test and --resume cannot be both activate")
@@ -172,6 +213,9 @@ def main(rank=0, world_size=1):
         # If called by wandb.agent, as below,
         # this config will be set by Sweep Controller
         wandb_config = wandb.config
+
+        # set run name
+        wandb.run.name = args.run_name
 
         # update the model config with wandb config
         for key, value in wandb_config.items():
@@ -245,6 +289,6 @@ if __name__ == "__main__":
         # # mp.spawn(main, args=(num_gpus, ), nprocs=num_gpus, join=True)
         # mp.spawn(main, args=(num_gpus,), nprocs=num_gpus, join=True)
     else:
-        # os.environ["CUDA_VISIBLE_DEVICES"] = "0"
-        # os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
+        os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+        os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
         main(rank=0, world_size=1)

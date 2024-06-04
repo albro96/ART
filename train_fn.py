@@ -117,13 +117,17 @@ def calc_loss_rotenc(model, data, config):
 
 
 def run_net(args, config):
-
+    print("Starting training", args.get("val_dataset", "val"))
     # optimizer = optim.AdamW(list(model.parameters()), lr=opt.lr)
 
     _, train_dataloader = builder.dataset_builder(
         args, config.dataset, mode="train", bs=config.bs
     )
-    _, val_dataloader = builder.dataset_builder(args, config.dataset, mode="val", bs=1)
+
+    _, val_dataloader = builder.dataset_builder(
+        args, config.dataset, mode=args.get("val_dataset", "val"), bs=1
+    )
+
     # _, test_dataloader = builder.dataset_builder(
     #     args, config.dataset, mode="test", bs=1
     # )
@@ -213,7 +217,6 @@ def run_net(args, config):
 
             # Update the model parameters
             optimizer.step()
-            model.zero_grad()
 
             # print(loss.item(), rot_loss_chamfer.item(), rot_loss_mse.item())
 
@@ -304,6 +307,7 @@ def validate(model, val_dataloader, epoch, args, config):
     }
 
     # rdm_idx = np.random.randint(0, len(val_dataloader.dataset))
+    all_losses_dict = {}
 
     with torch.no_grad():
         for i, data in enumerate(val_dataloader):
@@ -316,6 +320,11 @@ def validate(model, val_dataloader, epoch, args, config):
             data = data.to(args.device)
 
             loss_dict, pcd_rot, pcd_backrot = calc_loss_rotenc(model, data, config)
+
+            for key, val in loss_dict.items():
+                if key not in all_losses_dict:
+                    all_losses_dict[key] = []
+                all_losses_dict[key].append(val.item() * data.size(0))
 
             # loss = (
             #     loss_dict.rot_loss_mse
@@ -383,6 +392,14 @@ def validate(model, val_dataloader, epoch, args, config):
 
     if args.log_data:
         log_dict = {}
+        for key, val in all_losses_dict.items():
+            val = torch.tensor(val)
+            log_dict[f"val/{key}-mean"] = torch.mean(val)
+            log_dict[f"val/{key}-std"] = torch.std(val)
+            log_dict[f"val/{key}-min"] = torch.min(val)
+            log_dict[f"val/{key}-max"] = torch.max(val)
+            log_dict[f"val/{key}-median"] = torch.median(val)
+
         for key, val in val_loss_dict.items():
             log_dict[f"val/{key}"] = val
         wandb.log(

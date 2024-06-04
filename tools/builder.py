@@ -22,7 +22,7 @@ def dataset_builder(args, config, mode, bs):
     shuffle = mode == "train"
     drop_last = mode == "train"
 
-    if mode != "train":
+    if mode != "train" or args.get("val_dataset", "val") == "train":
         num_workers = 0
     else:
         num_workers = int(args.num_workers)
