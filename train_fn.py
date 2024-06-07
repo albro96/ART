@@ -14,18 +14,37 @@ import glob
 from pytorch3d.loss import chamfer_distance
 
 sys.path.append("/storage/share/code/01_scripts/modules/")
+
 from general_tools.format import format_duration
 from tools import builder
 from models import art_model
 
 
 def unfold_rotenc(data, rotenc, iters=5):
-    R_cum = torch.eye(3).unsqueeze(0).repeat(data.size(0), 1, 1).to(data.device)
-    for _ in range(iters):
-        R = rotenc(data.transpose(1, 2).contiguous())
-        data = torch.matmul(data, R).detach()
-        R_cum = torch.matmul(R_cum, R)
-    return R_cum
+    """
+    Unfold the rotation encoding of the data.
+
+    Parameters:
+    - data (torch.Tensor): The data to unfold the rotation encoding of.
+    - rotenc (torch.nn.Module): The rotation encoding network.
+    - iters (int): The number of iterations to unfold the rotation encoding.
+
+    Returns:
+    - torch.Tensor: The unfolded rotation encoding of the data.
+
+    """
+
+    if iters <= 1:
+        return rotenc(data.transpose(1, 2).contiguous())
+    else:
+        R_cum = torch.eye(3).unsqueeze(0).repeat(data.size(0), 1, 1).to(data.device)
+        for _ in range(iters):
+            R = rotenc(
+                torch.matmul(data, R_cum).transpose(1, 2).contiguous()
+            )  # integrated the matmul with R_cum here
+            # data = torch.matmul(data, R).detach()
+            R_cum = torch.matmul(R_cum, R)
+        return R_cum
 
 
 def get_angle(R1, R2):
@@ -45,7 +64,7 @@ def get_angle(R1, R2):
 
     batch_trace = functorch.vmap(torch.trace)(product)
 
-    cos_angle = torch.clamp((batch_trace - 1) / 2, -0.999, 0.999)
+    cos_angle = torch.clamp((batch_trace - 1) / 2, -1 + 1e-8, 1 - 1e-8)
 
     # angles of batched rotation matrices
     angle = torch.acos(cos_angle)
@@ -57,7 +76,7 @@ def get_angle(R1, R2):
 # ----------------------------- Train Single Model ----------------------------- #
 
 
-def calc_loss_rotenc(model, data, config):
+def calc_loss_rotenc(model, data, config, losses):
     loss_dict = EasyDict()
 
     # Define the rotation function
@@ -66,9 +85,20 @@ def calc_loss_rotenc(model, data, config):
     # see chapter 3.2 EQ 4 and 5
     # X^T = data -- data.shape = [num_points, 3] --> (R * data^T)^T = data * R^T
     # Apply random rotations to the data (R_tilde^T)
-    data_rot_1, rotmat_1 = random_rotate(data)
-    data_rot_2, rotmat_2 = random_rotate(data)
-    data_rot_3, rotmat_3 = random_rotate(data)
+    # bra added the rotation strength parameter
+    data_rot_1, rotmat_1 = random_rotate(
+        data, unique_batch_rot_angles=config.model.unique_batch_rot_angles
+    )
+    data_rot_2, rotmat_2 = random_rotate(
+        data, unique_batch_rot_angles=config.model.unique_batch_rot_angles
+    )
+    data_rot_3, rotmat_3 = random_rotate(
+        data, unique_batch_rot_angles=config.model.unique_batch_rot_angles
+    )
+
+    # data_rot_1, rotmat_1 = random_rotate(data, rotation_angle=torch.pi / 2)
+    # data_rot_2, rotmat_2 = random_rotate(data, rotation_angle=torch.pi / 4)
+    # data_rot_3, rotmat_3 = random_rotate(data, rotation_angle=torch.pi / 8)
 
     # Unfold the rotation encodings (R2^T) of the rotated data (R_tilde) --
     R_1 = unfold_rotenc(data_rot_1, model, config.model.iters)
@@ -78,12 +108,6 @@ def calc_loss_rotenc(model, data, config):
     # Unfold the rotation encoding of the original data (R1^T)
     R = unfold_rotenc(data, model, config.model.iters)
 
-    # rotmat = rotmat_1
-    # print(rotmat.shape)
-    # # check if all batch rot matrices in R are the same, i.e. if R[0, :, :] == R[1, :, :] == R[2, :, :] == ... == R[n, :, :]
-    # print(torch.all(torch.eq(rotmat[0, :, :], rotmat[12, :, :])))
-    # sys.exit()
-
     # Compute the product of the rotation matrices R_tilde = R2^T * R1 -- R_tilde^T = R1^T * R2  eq4
     # code is correct as is bcs all rot matrices are transposed to match the data shape
     rotprod_1 = torch.matmul(R, R_1.transpose(1, 2))
@@ -92,32 +116,35 @@ def calc_loss_rotenc(model, data, config):
 
     # Compute the mean squared error loss between the rotation matrices and their products
 
-    loss_dict.rot_loss_mse = (
-        F.mse_loss(rotmat_1, rotprod_1)
-        + F.mse_loss(rotmat_2, rotprod_2)
-        + F.mse_loss(rotmat_3, rotprod_3)
-    ) / 3
+    if "rot_loss_mse" in losses:
+        loss_dict.rot_loss_mse = (
+            F.mse_loss(rotmat_1, rotprod_1)
+            + F.mse_loss(rotmat_2, rotprod_2)
+            + F.mse_loss(rotmat_3, rotprod_3)
+        ) / 3
 
-    # Compute the angle between the rotation matrices and their products
-    loss_dict.rot_loss_angle = (
-        get_angle(rotmat_1, rotprod_1)
-        + get_angle(rotmat_2, rotprod_2)
-        + get_angle(rotmat_3, rotprod_3)
-    ) / 3
+    if "rot_loss_angle" in losses:
+        # Compute the angle between the rotation matrices and their products
+        loss_dict.rot_loss_angle = (
+            get_angle(rotmat_1, rotprod_1)
+            + get_angle(rotmat_2, rotprod_2)
+            + get_angle(rotmat_3, rotprod_3)
+        ) / 3
 
-    # Compute the chamfer loss between the rotated data and the product of the original data and the rotation matrices
-    # with torch.cuda.device(data.device):
-    loss_dict.rot_loss_chamfer = (
-        chamfer_distance(
-            torch.matmul(data, rotprod_1), data_rot_1, norm=config.model.cd_norm
-        )[0]
-        + chamfer_distance(
-            torch.matmul(data, rotprod_2), data_rot_2, norm=config.model.cd_norm
-        )[0]
-        + chamfer_distance(
-            torch.matmul(data, rotprod_3), data_rot_3, norm=config.model.cd_norm
-        )[0]
-    ) / 3
+    if "rot_loss_chamfer" in losses:
+        # Compute the chamfer loss between the rotated data and the product of the original data and the rotation matrices
+        # with torch.cuda.device(data.device):
+        loss_dict.rot_loss_chamfer = (
+            chamfer_distance(
+                torch.matmul(data, rotprod_1), data_rot_1, norm=config.model.cd_norm
+            )[0]
+            + chamfer_distance(
+                torch.matmul(data, rotprod_2), data_rot_2, norm=config.model.cd_norm
+            )[0]
+            + chamfer_distance(
+                torch.matmul(data, rotprod_3), data_rot_3, norm=config.model.cd_norm
+            )[0]
+        ) / 3
 
     return loss_dict, data_rot_1, torch.matmul(data_rot_1, rotprod_1.transpose(1, 2))
 
@@ -155,8 +182,8 @@ def run_net(args, config):
             ckpt_file = ckpts[-1]
             ckpt = torch.load(ckpt_file, map_location=args.device)
 
-            model.load_state_dict(ckpt)
-            optimizer.load_state_dict(ckpt)
+            model.load_state_dict(ckpt["m"])
+            optimizer.load_state_dict(ckpt["o"])
 
             # get epoch from state dict
             start_epoch = ckpt["epoch"] + 1
@@ -175,10 +202,9 @@ def run_net(args, config):
 
         train_loss_dict = {
             "total_loss": 0,
-            "rot_loss_mse": 0,
-            "rot_loss_chamfer": 0,
-            "rot_loss_angle": 0,
         }
+        for loss in config.train_losses:
+            train_loss_dict[loss] = 0
 
         n_batches = len(train_dataloader)
         batch_start_time = time.time()
@@ -197,19 +223,17 @@ def run_net(args, config):
             # Zero the gradients of the optimizer
             optimizer.zero_grad()
 
-            loss_dict, _, _ = calc_loss_rotenc(model, data, config)
-
-            # Compute the total loss
-            # loss =  rot_loss_mse * 0.02 + rot_loss_chamfer * opt.lambda2
-            # loss = (
-            #     loss_dict.rot_loss_mse
-            #     + loss_dict.rot_loss_chamfer * config.model.lambda_cd
-            # )
-
-            loss = (
-                loss_dict[config.model.rot_loss_type]
-                + loss_dict.rot_loss_chamfer * config.model.lambda_cd
+            loss_dict, _, _ = calc_loss_rotenc(
+                model, data, config, losses=config.train_losses
             )
+
+            if config.model.lambda_cd != 0:
+                loss = (
+                    loss_dict[config.model.rot_loss_type]
+                    + loss_dict.rot_loss_chamfer * config.model.lambda_cd
+                )
+            else:
+                loss = loss_dict[config.model.rot_loss_type]
 
             # Backpropagate the loss
 
@@ -224,17 +248,10 @@ def run_net(args, config):
             # Update the model parameters
             optimizer.step()
 
-            # print(loss.item(), rot_loss_chamfer.item(), rot_loss_mse.item())
-
             train_loss_dict["total_loss"] += loss * data.size(0)
             for key, val in loss_dict.items():
                 if key != "total_loss":
                     train_loss_dict[key] += val.item() * data.size(0)
-
-            # train_loss_dict["rot_loss_mse"] += rot_loss_mse.item() * data.size(0)
-            # train_loss_dict["rot_loss_chamfer"] += rot_loss_chamfer.item() * data.size(
-            #     0
-            # )
 
         batch_time = time.time() - batch_start_time
 
@@ -273,6 +290,9 @@ def run_net(args, config):
                     "o": optimizer.state_dict(),
                     "torch_rnd": torch.get_rng_state(),
                     "numpy_rnd": np.random.get_state(),
+                    "epoch": epoch,
+                    "val_loss_dict": val_loss_dict,
+                    "config": config,
                 }
 
                 if val_loss_dict["total_loss"] < best_loss:
@@ -307,10 +327,10 @@ def validate(model, val_dataloader, epoch, args, config):
     model.eval()
     val_loss_dict = {
         "total_loss": 0,
-        "rot_loss_mse": 0,
-        "rot_loss_chamfer": 0,
-        "rot_loss_angle": 0,
     }
+
+    for loss in config.val_losses:
+        val_loss_dict[loss] = 0
 
     # rdm_idx = np.random.randint(0, len(val_dataloader.dataset))
     all_losses_dict = {}
@@ -325,7 +345,9 @@ def validate(model, val_dataloader, epoch, args, config):
 
             data = data.to(args.device)
 
-            loss_dict, pcd_rot, pcd_backrot = calc_loss_rotenc(model, data, config)
+            loss_dict, pcd_rot, pcd_backrot = calc_loss_rotenc(
+                model, data, config, losses=config.val_losses
+            )
 
             for key, val in loss_dict.items():
                 if key not in all_losses_dict:
@@ -337,10 +359,13 @@ def validate(model, val_dataloader, epoch, args, config):
             #     + loss_dict.rot_loss_chamfer * config.model.lambda_cd
             # )
 
-            loss = (
-                loss_dict[config.model.rot_loss_type]
-                + loss_dict.rot_loss_chamfer * config.model.lambda_cd
-            )
+            if "rot_loss_chamfer" in loss_dict and config.model.lambda_cd != 0:
+                loss = (
+                    loss_dict[config.model.rot_loss_type]
+                    + loss_dict.rot_loss_chamfer * config.model.lambda_cd
+                )
+            else:
+                loss = loss_dict[config.model.rot_loss_type]
 
             val_loss_dict["total_loss"] += loss * data.size(0)
             for key, val in loss_dict.items():

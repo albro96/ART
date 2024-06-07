@@ -83,19 +83,13 @@ def main(rank=0, world_size=1):
             "mode": None,
             "save_checkpoints": True,
             "save_only_best": True,
-            "ckpt_dir": None,
-            "cfg_dir": None,
-            "log_data": False,  # if true: wandb logger on and save ckpts to local drive
-            "run_name": "azure-sweep-129-fulldataset",
+            "ckpt_dir": op.join(pada.model_base_dir, "ART", "ckpt"),
+            "cfg_dir": op.join(pada.model_base_dir, "ART", "config"),
+            "load_config_name": None,  # "bumbling-sweep-133",  # "azure-sweep-129",
+            "run_name": None,  # "bumbling-sweep-133-fulldataset-unique-batch-rots",  # "azure-sweep-129-fulldataset"
+            "log_data": True,  # if true: wandb logger on and save ckpts to local drive
         }
     )
-
-    if args.val_dataset != "val":
-        # ask user if they want to use train dataset for validation
-        if not ask_yes_no(
-            f"\nUsing {args.val_dataset} dataset for validation: continue?"
-        ):
-            sys.exit()
 
     bs_dict = {
         2048: 56,
@@ -118,49 +112,40 @@ def main(rank=0, world_size=1):
             "model": {
                 "NAME": "ART",
                 "iters": 5,
-                "lambda_cd": 0.00001,
+                "lambda_cd": 0,
                 "rot_loss_type": "rot_loss_angle",  # 'rot_loss_angle' or 'rot_loss_mse'
                 "gt_type": data_config.gt_type,
                 "grad_norm_clip": 5,
                 "cd_norm": 2,
                 "dropout_rate": 0,
+                "unique_batch_rot_angles": True,
             },
-            "max_epoch": 1000,
-            # "consider_metric": "CDL2",
+            "max_epoch": 500,
             "bs": bs_dict[data_config.num_points_gt],
             "step_per_update": 1,
             "model_name": "ART",
+            "train_losses": ["rot_loss_angle", "rot_loss_mse"],
+            "val_losses": ["rot_loss_angle", "rot_loss_mse"],
         }
     )
 
-    # # bumbling-sweep-133
-    # config = EasyDict(
-    #     {
-    #         "optimizer": {
-    #             "type": "Adam",
-    #             "kwargs": {
-    #                 "lr": 0.0001,
-    #                 "weight_decay": 1e-6,  # 0.0001
-    #             },
-    #         },
-    #         "dataset": data_config,
-    #         "model": {
-    #             "NAME": "ART",
-    #             "iters": 5,
-    #             "lambda_cd": 0.0001,
-    #             "rot_loss_type": "rot_loss_mse",  # 'rot_loss_angle' or 'rot_loss_mse'
-    #             "gt_type": data_config.gt_type,
-    #             "grad_norm_clip": 10,
-    #             "cd_norm": 2,
-    #             "dropout_rate": 0,
-    #         },
-    #         "max_epoch": 1000,
-    #         # "consider_metric": "CDL2",
-    #         "bs": bs_dict[data_config.num_points_gt],
-    #         "step_per_update": 1,
-    #         "model_name": "ART",
-    #     }
-    # )
+    assert (
+        config.model.rot_loss_type in config.train_losses
+    ), f"{config.model.rot_loss_type} not in train_losses"
+
+    if config.model.lambda_cd != 0 and not "rot_loss_chamfer" in config.train_losses:
+        config.train_losses.append("rot_loss_chamfer")
+
+    if args.load_config_name is not None:
+        cfg_path = os.path.join(
+            args.cfg_dir, "config-" + args.load_config_name + ".json"
+        )
+        with open(cfg_path, "r") as json_file:
+            config_load = EasyDict(json.load(json_file))
+
+        # update model and optimizer in config
+        config.model.update(config_load.model)
+        config.optimizer.update(config_load.optimizer)
 
     if args.test and args.resume:
         raise ValueError("--test and --resume cannot be both activate")
@@ -214,9 +199,6 @@ def main(rank=0, world_size=1):
         # this config will be set by Sweep Controller
         wandb_config = wandb.config
 
-        # set run name
-        wandb.run.name = args.run_name
-
         # update the model config with wandb config
         for key, value in wandb_config.items():
             if "." in key:
@@ -227,12 +209,23 @@ def main(rank=0, world_size=1):
                 config_temp[keys[-1]] = value
             else:
                 config[key] = value
+        wandb.config.update(config, allow_val_change=True)
 
         args.sweep = True if "sweep" in wandb_config else False
 
-        wandb.config.update(config, allow_val_change=True)
+        # set run name
+        if not args.sweep and args.get("run_name", None) is not None:
+            wandb.run.name = args.run_name
+
     else:
         args.sweep = False
+
+    if args.val_dataset != "val" and not args.sweep:
+        # ask user if they want to use train dataset for validation
+        if not ask_yes_no(
+            f"\nUsing {args.val_dataset} dataset for validation: continue?"
+        ):
+            sys.exit()
 
     args.experiment_path = os.path.join(args.experiment_dir, config.model_name)
     args.cfg_dir = op.join(args.experiment_path, "config")
@@ -262,6 +255,11 @@ def main(rank=0, world_size=1):
 
     pprint(config)
 
+    if args.load_config_name is not None:
+        print("Loaded config from: ", cfg_path)
+        if not ask_yes_no("Continue?"):
+            sys.exit()
+
     run_net(
         args=args,
         config=config,
@@ -273,6 +271,7 @@ if __name__ == "__main__":
     # User Input
     num_gpus = 1  # number of gpus, dont use 3
     print("Number of GPUs: ", num_gpus)
+    torch.autograd.set_detect_anomaly(True)
 
     if num_gpus > 1:
         sys.exit()
@@ -289,6 +288,8 @@ if __name__ == "__main__":
         # # mp.spawn(main, args=(num_gpus, ), nprocs=num_gpus, join=True)
         # mp.spawn(main, args=(num_gpus,), nprocs=num_gpus, join=True)
     else:
-        os.environ["CUDA_VISIBLE_DEVICES"] = "0"
-        os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
+
+        # os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+        # os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
+
         main(rank=0, world_size=1)
