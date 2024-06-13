@@ -150,6 +150,7 @@ def calc_loss_rotenc(model, data, config, losses):
 
 
 def run_net(args, config):
+    start_time = time.time()
     print("Starting training", args.get("val_dataset", "val"))
     # optimizer = optim.AdamW(list(model.parameters()), lr=opt.lr)
 
@@ -259,7 +260,7 @@ def run_net(args, config):
             train_loss_dict[key] = val / len(train_dataloader.dataset)
 
         if args.log_data:
-            log_dict = {"epoch": epoch}
+            log_dict = {"epoch": epoch, "time": (time.time() - start_time) / 60 / 60}
             for key, val in train_loss_dict.items():
                 log_dict[f"train/{key}"] = val
 
@@ -284,6 +285,10 @@ def run_net(args, config):
 
             val_loss_dict = validate(model, val_dataloader, epoch, args, config)
 
+            assert (
+                args.consider_metric in val_loss_dict
+            ), f"{args.consider_metric} not in val_loss_dict"
+
             if args.log_data:
                 checkpoint = {
                     "m": model.state_dict() if model else None,
@@ -295,20 +300,20 @@ def run_net(args, config):
                     "config": config,
                 }
 
-                if val_loss_dict["total_loss"] < best_loss:
-                    best_loss = val_loss_dict["total_loss"]
+                if val_loss_dict[args.consider_metric] < best_loss:
+                    best_loss = val_loss_dict[args.consider_metric]
                     torch.save(
                         checkpoint,
-                        os.path.join(args.ckpt_dir, f"ckpt-best-{wandb.run.name}.pth"),
+                        os.path.join(args.ckpt_dir, f"ckpt-{wandb.run.name}-best.pth"),
                     )
 
-        if args.save_checkpoints and not args.save_only_best and args.log_data:
-            torch.save(
-                checkpoint,
-                os.path.join(
-                    args.ckpt_dir, f"ckpt-epoch-{epoch:03d}-{wandb.run.name}.pth"
-                ),
-            )
+            if args.save_checkpoints and not args.save_only_best and args.log_data:
+                torch.save(
+                    checkpoint,
+                    os.path.join(
+                        args.ckpt_dir, f"ckpt-{wandb.run.name}-epoch-{epoch:04d}.pth"
+                    ),
+                )
 
         epoch_time_list.append(time.time() - epoch_allincl_start_time)
 

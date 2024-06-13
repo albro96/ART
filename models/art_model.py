@@ -3,6 +3,8 @@ import numpy as np
 from torch import nn
 from torch.nn import functional as F
 
+from pytorch3d.transforms import rotation_6d_to_matrix
+
 
 def normalize_vector(v):
     batch = v.shape[0]
@@ -164,7 +166,10 @@ class PointNetTransformNet(nn.Module):
 
     def forward(self, x):
         assert x.size(1) == 3, x.size()
-        mat = self.gram_schmidt(self.layers(x))
+        # mat1 = self.gram_schmidt(self.layers(x))
+        mat = torch.transpose(
+            rotation_6d_to_matrix(self.layers(x)), 1, 2
+        )  # pyt3d implementation needs to be transposed to match the original implementation, little bit faster than the above
 
         return mat
 
