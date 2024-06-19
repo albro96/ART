@@ -75,7 +75,7 @@ def main(rank=0, world_size=1):
             "experiment_dir": pada.model_base_dir,
             "start_ckpts": None,
             "ckpts": None,
-            "val_freq": 10,
+            "val_freq": 5,
             "val_dataset": "train",
             "test_freq": None,
             "resume": False,
@@ -93,10 +93,10 @@ def main(rank=0, world_size=1):
     )
 
     bs_dict = {
-        2048: 56,
-        4096: 28,
-        8192: 14,
-        16384: 6,
+        # 2048: 56,
+        # 4096: 28,
+        8192: 4,
+        # 16384: 6,
     }
 
     # azure-sweep-129
@@ -119,7 +119,10 @@ def main(rank=0, world_size=1):
                 "grad_norm_clip": 8,
                 "cd_norm": 2,
                 "dropout_rate": 0,
-                "unique_batch_rot_angles": True,
+                "rot_angle_type": "epoch",  # from 'epoch', 'batch', 'element' -- defines how many rot angles are used per epoch
+                "fixed_val_rot": True,  # if True, fixed rotation angles are used for validation over all epochs
+                "num_rotation_train": 10,
+                "num_rotation_val": 20,
             },
             "max_epoch": 300,
             "bs": bs_dict[data_config.num_points_gt],
@@ -177,8 +180,8 @@ def main(rank=0, world_size=1):
     if args.use_gpu:
         torch.backends.cudnn.benchmark = True
 
-    if config.model.iters > 5:
-        config.bs = 2
+    # if config.model.iters > 5:
+    #     config.bs = 2
 
     # ----------------------------- Prepare training -----------------------------
 
@@ -215,6 +218,8 @@ def main(rank=0, world_size=1):
                 config_temp[keys[-1]] = value
             else:
                 config[key] = value
+
+        # config.bs = int(np.floor(config.bs * 3 / config.model.num_rotation_train))
 
         wandb.config.update(config, allow_val_change=True)
 
@@ -257,15 +262,29 @@ def main(rank=0, world_size=1):
         os.makedirs(args.ckpt_dir, exist_ok=True)
         cfg_name = f"config-{wandb.run.name}.json"
 
-        with open(os.path.join(args.cfg_dir, cfg_name), "w") as json_file:
-            json_file.write(json.dumps(config, indent=4))
-
-    pprint(config)
-
     if not args.sweep and args.load_config_name is not None:
         print("Loaded config from: ", cfg_path)
         if not ask_yes_no("Continue?"):
             sys.exit()
+
+    if config.model.fixed_val_rot:
+        args.aa_val = [
+            torch.randn((3,), dtype=torch.float32)
+            for _ in range(config.model.num_rotation_val)
+        ]
+    else:
+        args.aa_val = None
+
+    if config.model.iters != 5:
+        config.bs *= int(5 / config.model.iters)
+        if args.log_data:
+            wandb.config.update(config, allow_val_change=True)
+
+    if args.log_data:
+        with open(os.path.join(args.cfg_dir, cfg_name), "w") as json_file:
+            json_file.write(json.dumps(config, indent=4))
+
+    pprint(config)
 
     run_net(
         args=args,

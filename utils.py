@@ -77,6 +77,37 @@ def rotate_y_np(x, theta):
     return x @ R
 
 
+def rotate_batch(x, aa):
+    """
+    Applies rotation to a batch of tensors.
+
+    Args:
+        x (torch.Tensor): The input tensor of shape (N, NUM_POINTS, 3).
+        aa (torch.Tensor): The rotation axis of shape (N, 3).
+
+    Returns:
+        torch.Tensor: The rotated tensor of the same shape as the input tensor.
+        torch.Tensor: The rotation matrix used for each input tensor.
+
+    """
+
+    # aa = torch.randn((3,), dtype=torch.float32)
+
+    theta = torch.sqrt(torch.sum(aa**2))
+    k = aa / (theta + 1e-6)
+    K = torch.tensor(
+        [[0, -k[2], k[1]], [k[2], 0, -k[0]], [-k[1], k[0], 0]], device=x.device
+    )
+    R = (
+        torch.eye(3, device=x.device)
+        + torch.sin(theta) * K
+        + (1 - torch.cos(theta)) * torch.mm(K, K)
+    )
+    R = R.unsqueeze(0).repeat(x.size(0), 1, 1)
+
+    return torch.matmul(x, R), R
+
+
 def random_rotate_batch(x, unique_batch_rot_angles=False):
     """
     Applies random rotation to a batch of tensors.

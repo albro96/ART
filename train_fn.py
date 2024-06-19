@@ -2,7 +2,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 import os, time
-from utils import random_rotate_batch
+from utils import random_rotate_batch, rotate_batch
 import sys
 import wandb
 import glob
@@ -74,79 +74,146 @@ def get_angle(R1, R2):
 
 
 # ----------------------------- Train Single Model ----------------------------- #
-
-
-def calc_loss_rotenc(model, data, config, losses):
+def calc_loss_rotenc(model, data, config, losses, aa=None, num_rotations=3):
     loss_dict = EasyDict()
 
-    # Define the rotation function
-    random_rotate = random_rotate_batch
+    assert aa is None or len(aa) == num_rotations
+    # num_rotations = len(aa) if aa is not None else config.model.num_rotations
 
-    # see chapter 3.2 EQ 4 and 5
-    # X^T = data -- data.shape = [num_points, 3] --> (R * data^T)^T = data * R^T
-    # Apply random rotations to the data (R_tilde^T)
-    # bra added the rotation strength parameter
-    data_rot_1, rotmat_1 = random_rotate(
-        data, unique_batch_rot_angles=config.model.unique_batch_rot_angles
-    )
-    data_rot_2, rotmat_2 = random_rotate(
-        data, unique_batch_rot_angles=config.model.unique_batch_rot_angles
-    )
-    data_rot_3, rotmat_3 = random_rotate(
-        data, unique_batch_rot_angles=config.model.unique_batch_rot_angles
-    )
+    data_rot = []
+    rotmat = []
+    for i in range(num_rotations):
+        if config.model.rot_angle_type == "element":
+            data_rot_i, rotmat_i = random_rotate_batch(
+                data, unique_batch_rot_angles=True
+            )
+        elif config.model.rot_angle_type == "batch":
+            data_rot_i, rotmat_i = random_rotate_batch(
+                data, unique_batch_rot_angles=False
+            )
+        elif config.model.rot_angle_type == "epoch":
+            data_rot_i, rotmat_i = rotate_batch(data, aa[i])
 
-    # data_rot_1, rotmat_1 = random_rotate(data, rotation_angle=torch.pi / 2)
-    # data_rot_2, rotmat_2 = random_rotate(data, rotation_angle=torch.pi / 4)
-    # data_rot_3, rotmat_3 = random_rotate(data, rotation_angle=torch.pi / 8)
+        data_rot.append(data_rot_i)
+        rotmat.append(rotmat_i)
 
-    # Unfold the rotation encodings (R2^T) of the rotated data (R_tilde) --
-    R_1 = unfold_rotenc(data_rot_1, model, config.model.iters)
-    R_2 = unfold_rotenc(data_rot_2, model, config.model.iters)
-    R_3 = unfold_rotenc(data_rot_3, model, config.model.iters)
+        # print(rotmat)
 
-    # Unfold the rotation encoding of the original data (R1^T)
-    R = unfold_rotenc(data, model, config.model.iters)
+    R_rand_rot = [
+        unfold_rotenc(data_rot_i, model, config.model.iters) for data_rot_i in data_rot
+    ]
 
-    # Compute the product of the rotation matrices R_tilde = R2^T * R1 -- R_tilde^T = R1^T * R2  eq4
-    # code is correct as is bcs all rot matrices are transposed to match the data shape
-    rotprod_1 = torch.matmul(R, R_1.transpose(1, 2))
-    rotprod_2 = torch.matmul(R, R_2.transpose(1, 2))
-    rotprod_3 = torch.matmul(R, R_3.transpose(1, 2))
+    R_orig = unfold_rotenc(data, model, config.model.iters)
 
-    # Compute the mean squared error loss between the rotation matrices and their products
+    rotprod = [torch.matmul(R_orig, R_i.transpose(1, 2)) for R_i in R_rand_rot]
 
     if "rot_loss_mse" in losses:
         loss_dict.rot_loss_mse = (
-            F.mse_loss(rotmat_1, rotprod_1)
-            + F.mse_loss(rotmat_2, rotprod_2)
-            + F.mse_loss(rotmat_3, rotprod_3)
-        ) / 3
+            sum(F.mse_loss(rotmat[i], rotprod[i]) for i in range(num_rotations))
+            / num_rotations
+        )
 
     if "rot_loss_angle" in losses:
-        # Compute the angle between the rotation matrices and their products
         loss_dict.rot_loss_angle = (
-            get_angle(rotmat_1, rotprod_1)
-            + get_angle(rotmat_2, rotprod_2)
-            + get_angle(rotmat_3, rotprod_3)
-        ) / 3
+            sum(get_angle(rotmat[i], rotprod[i]) for i in range(num_rotations))
+            / num_rotations
+        )
 
     if "rot_loss_chamfer" in losses:
-        # Compute the chamfer loss between the rotated data and the product of the original data and the rotation matrices
-        # with torch.cuda.device(data.device):
         loss_dict.rot_loss_chamfer = (
-            chamfer_distance(
-                torch.matmul(data, rotprod_1), data_rot_1, norm=config.model.cd_norm
-            )[0]
-            + chamfer_distance(
-                torch.matmul(data, rotprod_2), data_rot_2, norm=config.model.cd_norm
-            )[0]
-            + chamfer_distance(
-                torch.matmul(data, rotprod_3), data_rot_3, norm=config.model.cd_norm
-            )[0]
-        ) / 3
+            sum(
+                chamfer_distance(
+                    torch.matmul(data, rotprod[i]),
+                    data_rot[i],
+                    norm=config.model.cd_norm,
+                )[0]
+                for i in range(num_rotations)
+            )
+            / num_rotations
+        )
 
-    return loss_dict, data_rot_1, torch.matmul(data_rot_1, rotprod_1.transpose(1, 2))
+    return_idx = 0
+
+    return (
+        loss_dict,
+        data_rot[return_idx],
+        torch.matmul(data_rot[return_idx], rotprod[return_idx].transpose(1, 2)),
+    )
+
+
+# def calc_loss_rotenc(model, data, config, losses, aa=None):
+#     loss_dict = EasyDict()
+
+#     if aa is None:
+#         # see chapter 3.2 EQ 4 and 5
+#         # X^T = data -- data.shape = [num_points, 3] --> (R * data^T)^T = data * R^T
+#         # Apply random rotations to the data (R_tilde^T)
+#         # bra added the rotation strength parameter
+#         data_rot_1, rotmat_1 = random_rotate_batch(
+#             data, unique_batch_rot_angles=config.model.unique_batch_rot_angles
+#         )
+#         data_rot_2, rotmat_2 = random_rotate_batch(
+#             data, unique_batch_rot_angles=config.model.unique_batch_rot_angles
+#         )
+#         data_rot_3, rotmat_3 = random_rotate_batch(
+#             data, unique_batch_rot_angles=config.model.unique_batch_rot_angles
+#         )
+#     else:
+#         data_rot_1, rotmat_1 = rotate_batch(data, aa[0])
+#         data_rot_2, rotmat_2 = rotate_batch(data, aa[1])
+#         data_rot_3, rotmat_3 = rotate_batch(data, aa[2])
+
+#     # data_rot_1, rotmat_1 = random_rotate(data, rotation_angle=torch.pi / 2)
+#     # data_rot_2, rotmat_2 = random_rotate(data, rotation_angle=torch.pi / 4)
+#     # data_rot_3, rotmat_3 = random_rotate(data, rotation_angle=torch.pi / 8)
+
+#     # Unfold the rotation encodings (R2^T) of the rotated data (R_tilde) --
+#     R_1 = unfold_rotenc(data_rot_1, model, config.model.iters)
+#     R_2 = unfold_rotenc(data_rot_2, model, config.model.iters)
+#     R_3 = unfold_rotenc(data_rot_3, model, config.model.iters)
+
+#     # Unfold the rotation encoding of the original data (R1^T)
+#     R = unfold_rotenc(data, model, config.model.iters)
+
+#     # Compute the product of the rotation matrices R_tilde = R2^T * R1 -- R_tilde^T = R1^T * R2  eq4
+#     # code is correct as is bcs all rot matrices are transposed to match the data shape
+#     rotprod_1 = torch.matmul(R, R_1.transpose(1, 2))
+#     rotprod_2 = torch.matmul(R, R_2.transpose(1, 2))
+#     rotprod_3 = torch.matmul(R, R_3.transpose(1, 2))
+
+#     # Compute the mean squared error loss between the rotation matrices and their products
+
+#     if "rot_loss_mse" in losses:
+#         loss_dict.rot_loss_mse = (
+#             F.mse_loss(rotmat_1, rotprod_1)
+#             + F.mse_loss(rotmat_2, rotprod_2)
+#             + F.mse_loss(rotmat_3, rotprod_3)
+#         ) / 3
+
+#     if "rot_loss_angle" in losses:
+#         # Compute the angle between the rotation matrices and their products
+#         loss_dict.rot_loss_angle = (
+#             get_angle(rotmat_1, rotprod_1)
+#             + get_angle(rotmat_2, rotprod_2)
+#             + get_angle(rotmat_3, rotprod_3)
+#         ) / 3
+
+#     if "rot_loss_chamfer" in losses:
+#         # Compute the chamfer loss between the rotated data and the product of the original data and the rotation matrices
+#         # with torch.cuda.device(data.device):
+#         loss_dict.rot_loss_chamfer = (
+#             chamfer_distance(
+#                 torch.matmul(data, rotprod_1), data_rot_1, norm=config.model.cd_norm
+#             )[0]
+#             + chamfer_distance(
+#                 torch.matmul(data, rotprod_2), data_rot_2, norm=config.model.cd_norm
+#             )[0]
+#             + chamfer_distance(
+#                 torch.matmul(data, rotprod_3), data_rot_3, norm=config.model.cd_norm
+#             )[0]
+#         ) / 3
+
+#     return loss_dict, data_rot_1, torch.matmul(data_rot_1, rotprod_1.transpose(1, 2))
 
 
 def run_net(args, config):
@@ -195,6 +262,15 @@ def run_net(args, config):
     epoch_time_list = []
 
     for epoch in range(start_epoch, config.max_epoch + 1):
+
+        if config.model.rot_angle_type == "epoch":
+            aa_train = [
+                torch.randn((3,), dtype=torch.float32)
+                for _ in range(config.model.num_rotation_train)
+            ]
+        else:
+            aa_train = None
+
         epoch_allincl_start_time = time.time()
 
         print("\nEpoch {}/{}: Training".format(epoch, config.max_epoch))
@@ -225,7 +301,12 @@ def run_net(args, config):
             optimizer.zero_grad()
 
             loss_dict, _, _ = calc_loss_rotenc(
-                model, data, config, losses=config.train_losses
+                model,
+                data,
+                config,
+                losses=config.train_losses,
+                aa=aa_train,
+                num_rotations=config.model.num_rotation_train,
             )
 
             if config.model.lambda_cd != 0:
@@ -283,7 +364,19 @@ def run_net(args, config):
 
         if epoch % args.val_freq == 0:
 
-            val_loss_dict = validate(model, val_dataloader, epoch, args, config)
+            if epoch == args.val_freq:
+                val_loss_dict, best_vals_dict = validate(
+                    model, val_dataloader, epoch, args, config, best_vals_dict=None
+                )
+            else:
+                val_loss_dict, best_vals_dict = validate(
+                    model,
+                    val_dataloader,
+                    epoch,
+                    args,
+                    config,
+                    best_vals_dict=best_vals_dict,
+                )
 
             assert (
                 args.consider_metric in val_loss_dict
@@ -326,7 +419,8 @@ def run_net(args, config):
         )
 
 
-def validate(model, val_dataloader, epoch, args, config):
+def validate(model, val_dataloader, epoch, args, config, best_vals_dict=None):
+
     print("\nEpoch {}/{}: Validation".format(epoch, config.max_epoch))
 
     model.eval()
@@ -351,7 +445,12 @@ def validate(model, val_dataloader, epoch, args, config):
             data = data.to(args.device)
 
             loss_dict, pcd_rot, pcd_backrot = calc_loss_rotenc(
-                model, data, config, losses=config.val_losses
+                model,
+                data,
+                config,
+                losses=config.val_losses,
+                aa=args.aa_val,
+                num_rotations=config.model.num_rotation_val,
             )
 
             for key, val in loss_dict.items():
@@ -438,9 +537,25 @@ def validate(model, val_dataloader, epoch, args, config):
 
         for key, val in val_loss_dict.items():
             log_dict[f"val/{key}"] = val
+
+        # calc best losses
+        if best_vals_dict is not None:
+            for key, val in val_loss_dict.items():
+                if val < best_vals_dict[f"{key}-best"]:
+                    log_dict[f"val/{key}-best"] = val
+                    best_vals_dict[f"{key}-best"] = val
+        else:
+            best_vals_dict = {}
+            for key, val in val_loss_dict.items():
+                log_dict[f"val/{key}-best"] = val
+                best_vals_dict[f"{key}-best"] = val
+
         wandb.log(
             log_dict,
             step=epoch,
         )
 
-    return val_loss_dict
+        for term in best_vals_dict:
+            print("\t{}: {:.5f}".format(term, best_vals_dict[term]))
+
+    return val_loss_dict, best_vals_dict
